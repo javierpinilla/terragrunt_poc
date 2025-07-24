@@ -1,0 +1,121 @@
+name: Terraform Deployment Pipeline
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '**.txt'
+
+jobs:
+  detect-component:
+    runs-on: ubuntu-latest
+    outputs:
+      component: ${{ steps.detect.outputs.component }}
+      action: ${{ steps.detect.outputs.action }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Detect Component from Commit Message
+        id: detect
+        run: |
+          COMMIT_MSG=$(git log -1 --pretty=%B | tr -d '\n\r' | sed 's/[^[:print:]]//g' | xargs)
+
+          echo "Commit Message: '$COMMIT_MSG'"
+
+          case "$COMMIT_MSG" in
+            *"Crear VPC"*) found_component="vpc"; action="apply" ;;
+            *"Romper VPC"*) found_component="vpc"; action="destroy" ;;
+            *"Crear ALB"*) found_component="alb"; action="apply" ;;
+            *"Romper ALB"*) found_component="alb"; action="destroy" ;;
+            *"Crear EC2_BE"*) found_component="ec2_be"; action="apply" ;;
+            *"Romper EC2_BE"*) found_component="ec2_be"; action="destroy" ;;
+            *"Crear EC2_RUNNER"*) found_component="spot_runner"; action="apply" ;;
+            *"Romper EC2_RUNNER"*) found_component="spot_runner"; action="destroy" ;;
+            *"Crear RDS"*) found_component="rds"; action="apply" ;;
+            *"Romper RDS"*) found_component="rds"; action="destroy" ;;
+            *"Crear TODO"*) found_component="Todo"; action="apply" ;;
+            *"Romper TODO"*) found_component="Todo"; action="destroy" ;;
+            *) found_component="none"; action="none" ;;
+          esac
+
+          echo "Component detected: $found_component, Action: $action"
+          echo "component=$found_component" >> $GITHUB_OUTPUT
+          echo "action=$action" >> $GITHUB_OUTPUT
+
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:  # ¡Agrega esto!
+      id-token: write
+      contents: read
+    needs: detect-component
+    if: needs.detect-component.outputs.component != 'none' && needs.detect-component.outputs.action != 'none'
+    container:
+      image: javierpinilla7/terragrunt-github-actions:latest
+    strategy:
+      matrix:
+        include:
+          - name: vpc
+            path: iac/environment/prod/vpc
+          - name: alb
+            path: iac/environment/prod/alb
+          - name: ec2_be
+            path: iac/environment/prod/ec2_be
+          - name: spot_runner
+            path: iac/environment/prod/spot_runner
+          - name: rds
+            path: iac/environment/prod/rds
+          - name: Todo
+            path: iac/environment/prod/
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+      
+      - name: Debug OIDC Token
+        run: |
+          echo "ID Token URL: $ACTIONS_ID_TOKEN_REQUEST_URL"
+          echo "Runner environment:"
+          printenv
+        env:
+          ACTIONS_ID_TOKEN_REQUEST_URL: ${{ env.ACTIONS_ID_TOKEN_REQUEST_URL }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE }}
+          aws-region: us-east-1
+          role-session-name: GitHubActions-${{ github.run_id }}
+
+      - name: Terragrunt Init
+        if: needs.detect-component.outputs.component == matrix.name
+        run: cd ${{ matrix.path }} && terragrunt init
+
+      #- name: Terragrunt Plan
+      #  if: needs.detect-component.outputs.component == matrix.name && needs.detect-component.outputs.action == 'apply'
+      #  run: cd ${{ matrix.path }} && terragrunt plan
+
+      - name: Terragrunt Plan and Check for Destroys
+        if: needs.detect-component.outputs.component == matrix.name && needs.detect-component.outputs.action == 'apply'
+        run: |
+          cd ${{ matrix.path }}
+          terragrunt plan -no-color -input=false > plan_output.txt
+          DESTROY_COUNT=$(grep -oE '[0-9]+ to destroy' plan_output.txt | grep -oE '[0-9]+' || echo 0)
+          echo "Resources to destroy: $DESTROY_COUNT"
+          echo "HAS_DESTROYS=$([ "$DESTROY_COUNT" -gt 0 ] && echo 'true' || echo 'false')" >> $GITHUB_ENV
+          cat plan_output.txt
+
+          if [ "$DESTROY_COUNT" -gt 0 ] && [ "$ACCEPT_DESTROYS" != "yes" ]; then
+            echo "::error::Plan would destroy $DESTROY_COUNT resources. Set accept_destroys=yes to proceed."
+            exit 1
+          fi
+        env:
+          ACCEPT_DESTROYS: ${{ vars.ACCEPT_DESTROYS || 'no' }} ##Supuestamente si no está agregado como variable, es no.
+
+      - name: Terragrunt Apply
+        if: needs.detect-component.outputs.component == matrix.name && needs.detect-component.outputs.action == 'apply'
+        run: cd ${{ matrix.path }} && echo "terragrunt apply -auto-approve in $(pwd)"
+
+      - name: Terragrunt Destroy
+        if: needs.detect-component.outputs.component == matrix.name && needs.detect-component.outputs.action == 'destroy'
+        run: cd ${{ matrix.path }} && echo "terragrunt destroy -auto-approve in $(pwd)"

@@ -1,0 +1,16 @@
+**/.terraform/*
+.terraform
+.terraform.lock.hcl
+**/.terraform.lock.hcl
+tfplan
+**/tfplan/*
+tfplan.json
+**/tfplan.json/*
+tfplan*
+**/tfplan*/*
+state
+**/state/*
+.pluralith
+**/.pluralith/*
+.terragrunt-cache
+**/.terragrunt-cache/*
